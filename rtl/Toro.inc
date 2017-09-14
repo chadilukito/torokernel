@@ -12,6 +12,7 @@
 //{$DEFINE CPUX86_64}
 {$DEFINE DEBUG}
 {$DEFINE DebugCrash}
+{$DEFINE Monitors}
 //{$DEFINE DebugArch}
 //{$DEFINE DebugFS}
 //{$DEFINE DebugMemory}

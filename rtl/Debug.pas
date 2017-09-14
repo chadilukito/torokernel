@@ -39,20 +39,42 @@ interface
 
 uses Arch;
 
+Type
+  PLongInt = ^LongInt;
+
+
+
 procedure DebugInit;
+procedure MonitorsInit (Core: LongInt; Delay: LongInt);
 procedure WriteDebug (const Format: AnsiString; const Args: array of PtrUInt);
 procedure SetBreakPoint(Id: Qword);
+procedure AddMonitor (Variable: PLongInt; name: PChar);
 
 implementation
 
 uses Console, Process;
 
-var
-	LockDebug: UInt64 = 3;
-
-// base of serial port of COM1
 const
+  MAX_NR_MONITORS = 50;
+  // base of serial port of COM1
   BASE_COM_PORT = $3f8;
+
+Type
+  PMonitor = ^TMonitor;
+
+
+
+  TMonitor = Record
+    Variable: ^LongInt;
+    Name: array[0..255] of char;
+  end;
+
+
+var
+  LockDebug: UInt64 = 3;
+  LastMonitorId : LongInt = -1;
+  Monitors: array[0..MAX_NR_MONITORS-1] of PMonitor;
+  DelayforMonitor: LongInt = 1000;
 
 procedure WaitForCompletion;
 var
@@ -255,7 +277,6 @@ begin
   end;
 end;
 
-// Write debug information through the serial console
 procedure WriteDebug (const Format: AnsiString; const Args: array of PtrUInt);
 var
   CPUI: LongInt;
@@ -271,17 +292,60 @@ begin
   RestoreInt;
 end;
 
+procedure AddMonitor (Variable: PLongInt; name: PChar);
+var
+  f: LongInt;
+begin
+  if LastMonitorId = MAX_NR_MONITORS then
+  Exit;
+  LastMonitorId:= LastMonitorId + 1;
+  for f:= 0 to (strlen(name)-1) do
+  begin
+   Monitors[LastMonitorId].Name[f] := name[f];
+  end;
+  Monitors[LastMonitorId].Name[strlen(name)] := #0;
+  Monitors[LastMonitorId].Variable:= Variable;
+end;
 
-// initialize the debuging
+function ProcessMonitors(Param: Pointer): PtrInt;
+var j: LongInt;
+  l: LongInt;
+begin
+  while true do
+  begin
+   for j:= 0 to LastMonitorId do
+   begin
+     l := Monitors[j].Variable^;
+     WriteDebug('Monitor: %p = %d\n',[PtrUInt(@Monitors[j].Name[0]), l]);
+   end;
+  Sleep(DelayforMonitor);
+  end;
+  Result:= 0;
+end;
+
+procedure MonitorsInit (Core: LongInt; Delay: LongInt);
+var
+  ThreadID: TThreadID;
+begin
+  if (Delay <> 0) then
+  begin
+    DelayforMonitor := Delay;
+  end;
+  if PtrUInt(BeginThread(nil, 10*1024, @ProcessMonitors, nil, Core, ThreadID)) <> 0 then
+    WriteDebug('Monitors have been started\n',[ThreadID])
+  else
+    WriteDebug('Monitors initialization has failed\n',[]);
+end;
+
 procedure DebugInit;
 begin
-  // setting up serial port registers
   write_portb ($83, BASE_COM_PORT+3);
   write_portb (0, BASE_COM_PORT+1);
   write_portb (1, BASE_COM_PORT);
   write_portb (3, BASE_COM_PORT+3);
   WriteConsole ('Toro on /Vdebug mode/n using /VCOM1/n\n',[]);
-  WriteDebug('Initialization of debugging console.\n',[]);
+  WriteDebug('Initialization of debugging console\n',[]);
+  WriteDebug('Compiled with FPC%d\n',[FPC_FULLVERSION]);
   {$IFDEF DebugCrash}
      WriteDebug('Crash dumping is Enabled\n',[]);
   {$ELSE}
