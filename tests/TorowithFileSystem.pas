@@ -37,6 +37,8 @@ program TorowithFileSystem;
 
 {$IMAGEBASE 4194304}
 
+//{$DEFINE Monitors}
+
 // Configuring the run for Lazarus
 {$IFDEF WIN64}
           {%RunCommand qemu-system-x86_64.exe -m 512 -smp 2 -drive format=raw,file=TorowithFileSystem.img -net nic,model=e1000 -net tap,ifname=TAP2 -drive format=raw,file=ToroFiles.img -serial file:torodebug.txt}
@@ -44,6 +46,7 @@ program TorowithFileSystem;
          {%RunCommand qemu-system-x86_64 -m 512 -smp 2 -drive format=raw,file=TorowithFileSystem.img -serial file:torodebug.txt}
 {$ENDIF}
 {%RunFlags BUILD-}
+
 
 uses
   Kernel in '..\rtl\Kernel.pas',
@@ -138,6 +141,11 @@ begin
 end;
 
 begin
+  // User must manually initialize the monitors
+  {$IFDEF Monitors}
+          MonitorsInit(DWORD(-1),0);
+  {$ENDIF}
+
   // Dedicate the ne2000 network card to local cpu
   DedicateNetwork('e1000', LocalIP, Gateway, MaskIP, nil);
 

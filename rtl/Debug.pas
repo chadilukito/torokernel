@@ -55,14 +55,12 @@ implementation
 uses Console, Process;
 
 const
-  MAX_NR_MONITORS = 50;
+  MAX_NR_MONITORS = 10;
   // base of serial port of COM1
   BASE_COM_PORT = $3f8;
 
 Type
   PMonitor = ^TMonitor;
-
-
 
   TMonitor = Record
     Variable: ^LongInt;
@@ -72,8 +70,8 @@ Type
 
 var
   LockDebug: UInt64 = 3;
-  LastMonitorId : LongInt = -1;
-  Monitors: array[0..MAX_NR_MONITORS-1] of PMonitor;
+  LastMonitorId : LongInt = 0;
+  Monitors: array[0..MAX_NR_MONITORS-1] of TMonitor;
   DelayforMonitor: LongInt = 1000;
 
 procedure WaitForCompletion;
@@ -292,19 +290,27 @@ begin
   RestoreInt;
 end;
 
+//
+// Monitors' code
+//
+
+// Add a new variable to be sampled
+// This must be called once during the initilization of the system
+// There is no protection for concurrent access
 procedure AddMonitor (Variable: PLongInt; name: PChar);
 var
   f: LongInt;
 begin
   if LastMonitorId = MAX_NR_MONITORS then
   Exit;
-  LastMonitorId:= LastMonitorId + 1;
   for f:= 0 to (strlen(name)-1) do
   begin
    Monitors[LastMonitorId].Name[f] := name[f];
   end;
   Monitors[LastMonitorId].Name[strlen(name)] := #0;
   Monitors[LastMonitorId].Variable:= Variable;
+  //WriteDebug('Dir: %h, LastMonitorId: %d\n',[PtrUInt(Variable), PtrUInt(LastMonitorId)]);
+  LastMonitorId:= LastMonitorId + 1;
 end;
 
 function ProcessMonitors(Param: Pointer): PtrInt;
@@ -313,16 +319,19 @@ var j: LongInt;
 begin
   while true do
   begin
-   for j:= 0 to LastMonitorId do
+   WriteDebug('Monitors: Sampling monitor variables every %d ms\n',[DelayforMonitor]);
+   for j:= 0 to (LastMonitorId - 1) do
    begin
      l := Monitors[j].Variable^;
-     WriteDebug('Monitor: %p = %d\n',[PtrUInt(@Monitors[j].Name[0]), l]);
+     WriteDebug('Monitor: Id: %d, %p = %d\n',[j, PtrUInt(@Monitors[j].Name[0]), l]);
    end;
+   WriteDebug('Monitors: Sleeping\n',[]);
   Sleep(DelayforMonitor);
   end;
   Result:= 0;
 end;
 
+// This creates the thread that samples variables
 procedure MonitorsInit (Core: LongInt; Delay: LongInt);
 var
   ThreadID: TThreadID;
@@ -353,6 +362,4 @@ begin
   {$ENDIF}
   {$IFDEF DCC} System.DebugTraceProc := @DebugTrace; {$ENDIF}
 end;
-
 end.
-

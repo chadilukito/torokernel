@@ -104,6 +104,9 @@ type
     CurrentThread: PThread; // thread running in this moment  , in this CPU
     Threads: PThread; // this tail is use by scheduler
     MsgsToBeDispatched: array[0..MAX_CPU-1] of PThreadCreateMsg;
+    {$IFDEF Monitors}
+    NumberOfThreads: LongInt;
+    {$ENDIF}
   end;
 
   // Structure used by ThreadCreate in order to pass the arguments to create a remote thread
@@ -738,6 +741,9 @@ begin
       CPU[I].MsgsToBeDispatched[J] := nil;
       CpuMxSlots[I][J] := nil;
     end;
+    {$IFDEF Monitors}
+            CPU[I].NumberOfThreads:= 0;
+    {$ENDIF}
   end;
   if CPU_COUNT = 1 then
   begin // with one cpu we do not need any initialization proc.
@@ -895,6 +901,7 @@ begin
     NewThread.ret_thread_sp := Pointer(PtrUInt(NewThread.ret_thread_sp) - SizeOf(Pointer)*2);
     // enqueu the new thread in the local tail
     AddThreadReady(NewThread);
+    {$IFDEF Monitors} CPU[GetApicId].NumberOfThreads:= CPU[GetApicId].NumberOfThreads + 1; {$ENDIF}
     Result := NewThread
   end else begin 
     // We have to send a msg to the remote core using the CpuMxSlot
@@ -955,6 +962,7 @@ begin
     ToroFreeMem(CurrentThread.TLS);
   ToroFreeMem (CurrentThread.StackAddress);
   ToroFreeMem(CurrentThread);
+  {$IFDEF Monitors} CPU[GetApicID].NumberOfThreads := CPU[GetApicID].NumberOfThreads - 1 ; {$ENDIF}
   {$IFDEF DebugProcess} WriteDebug('ThreadExit: ThreadID: %h\n', [CurrentThread.ThreadID]); {$ENDIF}
   if Schedule then  
     // try to Schedule a new thread
@@ -1285,6 +1293,7 @@ end;
 
 // Initialize all local structures and send the INIT IPI to all cpus  
 procedure ProcessInit;
+var j: LongInt;
 begin  
   // do Panic() if we can't calculate LocalCpuSpeed
   Panic(LocalCpuSpeed = 0,'LocalCpuSpeed = 0\n');
@@ -1299,6 +1308,12 @@ begin
     InitializeExceptions;
   InitCores;
   {$IFDEF DebugProcess} WriteDebug('ProcessInit: LocalCpuSpeed: %d Mhz, Cores: %d\n', [LocalCpuSpeed, CPU_COUNT]); {$ENDIF}
+  {$IFDEF Monitors}
+  for j:= 0 to (CPU_COUNT-1) do
+  begin
+    AddMonitor(@CPU[j].NumberOfThreads, 'numberofthreads');
+  end;
+  {$ENDIF}
   // functions to manipulate threads. Transparent for pascal programmers
 {$IFDEF FPC}
 
