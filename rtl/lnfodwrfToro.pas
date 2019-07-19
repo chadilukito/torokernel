@@ -31,7 +31,9 @@ type
   CodePointer = Pointer;
 {$ENDIF}
 
-uses Console, Debug;
+uses
+  {$IFDEF EnableDebug} Debug, {$ENDIF}
+  Console;
 
 function GetLineInfo(addr:ptruint;var func,source: shortstring;var line:longint) : boolean;
 procedure PrintBackTraceStr(addr: Pointer);
@@ -70,6 +72,9 @@ type
 
 const
   EBUF_SIZE = 100;
+
+  // Debug section is written at address $700000
+  DEBUG_MEMOFFS = $700000;
 
 //{$WARNING This code is not thread-safe, and needs improvement}
 var
@@ -165,26 +170,25 @@ end;
 
 function OpenDwarf(addr : pointer) : boolean;
 var
-  p: ^longint;
+  p: ^QWord;
 begin
   // False by default
-  OpenDwarf:=False;
-
+  OpenDwarf := False;
   // Empty so can test if GetModuleByAddr has worked
   filename := '';
-
 {$ifdef DEBUG_LINEINFO}
   //writeln(stderr,filename,' Baseaddr: ',hexstr(ptruint(baseaddr),sizeof(baseaddr)*2));
 {$endif DEBUG_LINEINFO}
-
   lastfilename := filename;
-  // debug info is set up at address $600000
-  // this leaves 2MB for kernel + user code and data
-  p := pointer($600000 - sizeof(DWORD));
+  p := pointer(DEBUG_MEMOFFS - sizeof(QWord));
   dwarfsize := p^;
-  p := pointer($600000);
+  If dwarfsize = 0 then
+  begin
+    Exit;
+  end;
+  p := pointer(DEBUG_MEMOFFS);
   dwarfoffset := PtrUInt(p);
-  OpenDwarf:=True;
+  OpenDwarf := True;
   //lastopendwarf:=True;
 end;
 
@@ -755,55 +759,48 @@ begin
   end;
 end;
 
-function GetLineInfo(addr : ptruint; var func, source: shortstring; var line : longint) : boolean;
+function GetLineInfo(addr: ptruint; var func, source: shortstring; var line : longint) : boolean;
 var
-  current_offset : QWord;
-  end_offset : QWord;
-
-  found : Boolean;
-
+  EndOffset: QWord;
+  Found: Boolean;
+  Offset: QWord;
 begin
   func := '';
   source := '';
-  found := False;
+  Found := False;
   GetLineInfo:=False;
-
   if not OpenDwarf(pointer(addr)) then
-    exit;
-
-  current_offset := DwarfOffset;
-  end_offset := DwarfOffset + DwarfSize;
-
-  while (current_offset < end_offset) and (not found) do begin
-    Init(current_offset, end_offset - current_offset);
-    current_offset := ParseCompilationUnit(addr, current_offset, source, line, found);
+    Exit;
+  Offset := DwarfOffset;
+  EndOffset := DwarfOffset + DwarfSize;
+  while (Offset < EndOffset) and (not Found) do
+  begin
+    Init(Offset, EndOffset - Offset);
+    Offset := ParseCompilationUnit(addr, Offset, source, line, Found);
   end;
-
-  GetLineInfo:=True;
+  Result := True;
 end;
 
 
 procedure PrintBackTraceStr(addr: Pointer);
 var
-  func,
-  source: shortstring;
-  line   : longint;
-  Store  : TBackTraceStrFunc;
-  Success : boolean;
+  Func, Source: shortstring;
+  Line: LongInt;
+  Store: TBackTraceStrFunc;
+  Success: Boolean;
 begin
-  { reset to prevent infinite recursion if problems inside the code }
   Success:=False;
   Store := BackTraceStrFunc;
   BackTraceStrFunc := @SysBackTraceStr;
-  Success:=GetLineInfo(ptruint(addr), func, source, line);
+  Success:=GetLineInfo(ptruint(addr), Func, Source, Line);
   if Success then
   begin
-    WriteConsoleF('[%h] %p:%d\n',[ptruint(addr), PtrUInt(@source[1]), line]);
-    WriteDebug('[%h] %p:%d\n',[ptruint(addr), PtrUInt(@source[1]),line]);
+    WriteConsoleF('[%h] %p:%d\n',[ptruint(addr), PtrUInt(@Source[1]), Line]);
+    {$IFDEF EnableDebug}WriteDebug('[%h] %p:%d\n',[ptruint(addr), PtrUInt(@Source[1]),Line]);{$ENDIF}
   end else
   begin
     WriteConsoleF('[%h] in ??:??\n',[PtrUInt(addr)]);
-    WriteDebug('[%h] in ??:??\n',[PtrUInt(addr)]);
+    {$IFDEF EnableDebug}WriteDebug('[%h] in ??:??\n',[PtrUInt(addr)]);{$ENDIF}
   end;
   BackTraceStrFunc := Store;
 end;

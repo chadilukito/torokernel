@@ -1,20 +1,9 @@
 //
 // Console.pas
 //
-// Console Manipulation.
-// 
-// Changes:
-// 
-// 18/12/2016 Adding protection to WriteConsoleF()
-// 04/09/2016 Removing Printk_(), only WriteConsoleF() is used which is protected. 
-// 11/12/2011 Implementing "Lock" for concurrent access to the console in WriteConsoleF() procedure. Printk_ is still free of protection.
-// 27/03/2009 Adding support for QWORD parameters in Printk_() and WriteConsoleF().
-// 08/02/2007 Rename to Console.pas  , new procedures to read and write the console by Matias Vara.
-//            The consoles's procedures are only for users, the kernel only need PrintK_().
-// 15/07/2006 The code was rewrited  by Matias Vara.
-// 09/02/2005 First Version by Matias Vara.
+// This unit contains the functions that handle the console.
 //
-// Copyright (c) 2003-2016 Matias Vara <matiasevara@gmail.com>
+// Copyright (c) 2003-2018 Matias Vara <matiasevara@gmail.com>
 // All Rights Reserved
 //
 //
@@ -59,32 +48,33 @@ implementation
 
 {$MACRO ON}
 {$DEFINE EnableInt := asm sti;end;}
-{$DEFINE DisableInt := asm pushf;cli;end;}
-{$DEFINE RestoreInt := asm popf;end;}
+{$DEFINE DisableInt := asm pushfq;cli;end;}
+{$DEFINE RestoreInt := asm popfq;end;}
 
 
 const
-    CHAR_CODE : array [1..57] of XChar =
-   ('0','1','2','3','4','5','6','7','8','9','0','?','=','0',' ','q','w',
+  CHAR_CODE : array [1..57] of XChar =
+  ('0','1','2','3','4','5','6','7','8','9','0','?','=','0',' ','q','w',
    'e','r','t','y','u','i','o','p','[',']','0','0','a','s','d','f','g','h',
    'j','k','l','¤','{','}','0','0','z','x','c','v','b','n','m',',','.','-',
    '0','*','0',' ');
 
 const
-	VIDEO_OFFSET = $B8000;
+  VIDEO_OFFSET = $B8000;
+  BASE_COM_PORT = $3f8;
 
 type
-	TConsole = record // screen text mode
-		car: XChar;
-		form: Byte;
-	end;
-
+  TConsole = record
+    car: XChar;
+    form: Byte;
+  end;
 
 var
-	// Protection for concurrent access
-	LockConsole: UInt64 = 3;
+  LockConsole: UInt64 = 3;
 
 procedure PrintString(const S: AnsiString); forward;
+procedure PutCtoScreen(const Car: XChar); forward;
+procedure PutCtoSerial(C: XChar); forward;
 
 var
   PConsole: ^TConsole;
@@ -93,27 +83,33 @@ var
   BufferCount: LongInt = 1 ;
   ThreadInKey: PThread = nil;
   LastChar: LongInt = 1;
-	
-// position the cursor in screen 
+  {$IFDEF UseSerialasConsole}
+   PutC: procedure (C: Char) = PutCtoSerial;
+  {$ELSE}
+   PutC: procedure (const C: Char) = PutCtoScreen;
+  {$ENDIF}
+
 procedure SetCursor(X, Y: Byte);
 begin
-	write_portb($0E, $3D4);
-	write_portb(Y, $3D5);
-	write_portb($0f, $3D4);
-	write_portb(X, $3D5);
+  write_portb($0E, $3D4);
+  write_portb(Y, $3D5);
+  write_portb($0f, $3D4);
+  write_portb(X, $3D5);
 end;
 
-
-// Flush up the screen
 procedure FlushUp;
 begin
-  X := 0 ;
-  Move(PXChar(VIDEO_OFFSET+160)^, PXChar(VIDEO_OFFSET)^, 24*80*2);
-  FillWord(PXChar(VIDEO_OFFSET+160*24)^, 80, $0720);
+  {$IFDEF UseSerialasConsole}
+    PutCtoSerial(XChar(13));
+    PutCtoSerial(XChar(10));
+  {$ELSE}
+   X := 0 ;
+   Move(PXChar(VIDEO_OFFSET+160)^, PXChar(VIDEO_OFFSET)^, 24*80*2);
+   FillWord(PXChar(VIDEO_OFFSET+160*24)^, 80, $0720);
+  {$ENDIF}
 end;
 
-// Put caracter to screen 
-procedure PutC(const Car: XChar);
+procedure PutCtoScreen(const Car: XChar);
 begin
   Y := 24;
   if X > 79 then
@@ -123,6 +119,21 @@ begin
   PConsole.car := Car;
   X := X+1;
   SetCursor(X, Y);
+end;
+
+procedure WaitForCompletion;
+var
+  lsr: Byte;
+begin
+  repeat
+    lsr := read_portb(BASE_COM_PORT+5);
+  until (lsr and $20) = $20;
+end;
+
+procedure PutCtoSerial(C: XChar);
+begin
+  write_portb(Byte(C), BASE_COM_PORT);
+  WaitForCompletion;
 end;
 
 {$IFDEF DCC}
@@ -137,13 +148,10 @@ begin
 end;
 {$ENDIF}
 
-
-// Print in decimal form
 procedure PrintDecimal(Value: PtrUInt);
 var
   I, Len: Byte;
-  // 21 is the max number of characters needed to represent 64 bits number in decimal
-  S: string[21];
+  S: string[21]; // 21 is the max number of characters needed to represent 64 bits number in decimal
 begin
   Len := 0;
   I := 21;
@@ -191,21 +199,19 @@ end;
 
 procedure PrintString(const S: AnsiString);
 var
-	I: Integer;
+  I: Integer;
 begin
-	for I := 1 to Length(S) do
-  	PutC(S[I]);
+  for I := 1 to Length(S) do
+    PutC(S[I]);
 end;
 
-// Clean the screen 
 procedure CleanConsole;
 begin
   FillWord(PXChar(video_offset)^, 2000, $0720);
-	X := 0;
-	Y := 0;
+  X := 0;
+  Y := 0;
 end;
 
-// Print to screen using format
 procedure WriteConsoleF(const Format: AnsiString; const Args: array of PtrUInt);
 var
   ArgNo: LongInt;
@@ -213,78 +219,89 @@ var
   Value: QWORD;
   Values: PXChar;
   tmp: TNow;
+  ValueSt: PAnsiString;
 begin
+  {$IFDEF ToroHeadLess}
+    Exit;
+  {$ENDIF}
   DisableInt;
   SpinLock (3,4,LockConsole);
-  
+
   ArgNo := 0 ;
   J := 1;
   while J <= Length(Format) do
   begin
-    // we have an argument
     if (Format[J] = '%') and (High(Args) <> -1) and (High(Args) >= ArgNo) then
     begin
-      J:= J+1;
+      Inc(J);
       if J > Length(Format) then
-      	Exit ;
+        Exit ;
       case Format[J] of
-	      'c':
-          begin
-		        PutC(XChar(args[ArgNo]));
-			    end;
+        'c': 
+           begin
+             PutC(XChar(args[ArgNo]));
+           end;
         'h':
-          begin
+           begin
             Value := args[ArgNo];
-          	PrintHexa(Value);
-          end;
-     	  'd':
-          begin
+            PrintHexa(Value);
+           end;
+        'd':
+           begin
             Value := args[ArgNo];
-          	PrintDecimal (Value);
-          end;
-     	  '%':
-          begin
+            PrintDecimal (Value);
+           end;
+        '%':
+           begin
             PutC('%');
-          end;
+           end;
+        's':
+           begin
+            ValueSt := Pointer(args[ArgNo]);
+            PrintString (ValueSt^);
+           end;
         'p':
-          begin
-            Values := pointer(args[ArgNo]);
-            while Values^ <> #0 do
-            begin
-              PutC(Values^);
-              Inc(Values);
-            end;
-          end;
-      	else
-      	begin
-        	J:= J+1;
-        	Continue;
+           begin
+             Values := pointer(args[ArgNo]);
+             while Values^ <> #0 do
+             begin
+               PutC(Values^);
+               Inc(Values);
+             end;
+           end;
+        else
+        begin
+          Inc(J);
+          Continue;
         end;
       end;
-      J:= J+1;
-      ArgNo := ArgNo+1;
+      Inc(J);
+      Inc(ArgNo);
       Continue;
     end;
     if Format[J] = '\' then
     begin
-    	J:= J+1;
-     	if J > Length(Format) then
-      	Exit ;
+      Inc(J);
+      if J > Length(Format) then
+        Exit ;
       case Format[J] of
-       	'c': begin
-        			 CleanConsole;
-           		 J:=J+1;
-            end;
-       	'n': begin
-           		 FlushUp;
-           		 J:= J+1;
-							 x := 0;
-            end;
-       	'\': begin
-           		PutC('\');
-           		J:=J+1;
-            end;
-       	'v':
+        'c':
+          begin
+            CleanConsole;
+            Inc(J);
+          end;
+        'n':
+          begin
+            FlushUp;
+            Inc(J);
+            x := 0;
+          end;
+        '\':
+          begin
+            PutC('\');
+            Inc(J);
+          end;
+        'v':
           begin
             I := 1;
             while I < 10 do
@@ -294,36 +311,40 @@ begin
             end;
             J:=J+1;
           end;
-        't': begin
-               Now(@tmp);
-			   if (tmp.Day < 10) then PrintDecimal (0);
-               PrintDecimal (tmp.Day);
-               PutC('/');
-			   if (tmp.Month < 10) then PrintDecimal (0);
-               PrintDecimal (tmp.Month);
-               PutC('/');
-               PrintDecimal (tmp.Year);
-               PutC('-');
-			   if (tmp.Hour < 10) then PrintDecimal (0);
-               PrintDecimal (tmp.Hour);
-               PutC(':');
-			   if (tmp.Min < 10) then PrintDecimal (0);
-               PrintDecimal (tmp.Min);
-               PutC(':');
-			   if (tmp.Sec < 10) then PrintDecimal (0);
-               PrintDecimal (tmp.Sec);
-
-             J:=J+1;
-             end;
-				else
-       	begin
-       		PutC('\');
-        	PutC(Format[J]);
-      	end;
-      end;
-      Continue;
+        't':
+          begin
+            Now(@tmp);
+            if (tmp.Day < 10) then
+              PrintDecimal (0);
+            PrintDecimal (tmp.Day);
+            PutC('/');
+            if (tmp.Month < 10) then
+              PrintDecimal (0);
+            PrintDecimal (tmp.Month);
+            PutC('/');
+            PrintDecimal (tmp.Year);
+            PutC('-');
+            if (tmp.Hour < 10) then
+              PrintDecimal (0);
+            PrintDecimal (tmp.Hour);
+            PutC(':');
+            if (tmp.Min < 10) then
+              PrintDecimal (0);
+            PrintDecimal (tmp.Min);
+            PutC(':');
+            if (tmp.Sec < 10) then
+              PrintDecimal (0);
+            PrintDecimal (tmp.Sec);
+            Inc(J);
+          end;
+        else
+        begin
+          PutC('\');
+          PutC(Format[J]);
+        end;
     end;
-    // Terminal Color indicator
+    Continue;
+    end;
     if Format[J] = '/' then
     begin
       Inc(J);
@@ -350,62 +371,55 @@ begin
   RestoreInt;
 end;
 
-// Handler the irq of keyboard
 procedure KeyHandler;
 var
-  key: Byte;
-  pbuff: PXChar;
+  Key: Byte;
+  PBuff: PXChar;
 begin
   EOI;
   while (read_portb($64) and 1) = 1 do
   begin
-    key:=read_portb($60);
-    key:= 127 and key;
-    // Shift and Crt key are not implement
-    if key and 128 <> 0 then
+    Key := read_portb($60);
+    Key := 127 and Key;
+    if Key and 128 <> 0 then
       Exit;
-    // Manipulation of keys
-    case key of
-      //Shift, Crt and CpsLockk are not implement
+    case Key of
       29,42,58: Exit;
       14:
         begin
-          //Bkspc key
-          if x<>0 then
-	        begin
-	          x := x-1;
+          if x <> 0 then
+          begin
+            Dec(x);
             PutC(#0);
-            x:= x-1;
-	          setcursor(x,y);
-	        end;
+            Dec(x);
+            Setcursor(x,y);
+          end;
         end;
       28:
         begin
-          // Enter Key
-	        y := y+1;
-	        if y = 25 then
-	          FlushUp;
-	        SetCursor(x,y);
-          BufferCount := BufferCount+1;
+          Inc(y);
+          if y = 25 then
+            FlushUp;
+          SetCursor(x,y);
+          Inc(BufferCount);
           if BufferCount > SizeOf(KeyBuffer) then
-            BufferCount:=1;
+            BufferCount := 1;
           pbuff := @KeyBuffer[BufferCount];
-	        pbuff^ := #13;
-	        if ThreadinKey <> nil then
-	          ThreadinKey.state:=tsReady;
+          pbuff^ := #13;
+          if ThreadinKey <> nil then
+            ThreadinKey.state := tsReady;
         end;
       75,72,80,77: Continue;
       else
       begin
-        // Printing the key to the screen
         Inc(BufferCount);
         if BufferCount > SizeOf(KeyBuffer) then
-          BufferCount:=1;
-        pbuff := @KeyBuffer[BufferCount];
-	      pbuff^ := Char_Code[key];
-	      PutC(pbuff^);
-	      if ThreadinKey <> nil then
-	        ThreadinKey.state:=tsReady;
+          BufferCount := 1;
+        PBuff := @KeyBuffer[BufferCount];
+        PBuff^ := Char_Code[Key];
+        PutC(PBuff^);
+        if ThreadinKey <> nil then
+          ThreadinKey.state := tsReady;
       end;
     end;
   end;
@@ -460,7 +474,6 @@ asm
   db $cf
 end;
 
-// Read a Char from Console
 procedure ReadConsole(out C: XChar);
 begin
   ThreadInkey := GetCurrentThread;
@@ -469,14 +482,13 @@ begin
     ThreadInKey.state := tsIOPending;
     SysThreadSwitch;
   end;
-  LastChar := LastChar+1;
+  Inc(LastChar);
   if LastChar > SizeOf(KeyBuffer) then
     LastChar := SizeOf(KeyBuffer);
   C := KeyBuffer[LastChar];
   ThreadInKey := nil;
 end;
 
-// Read the console until [Enter] key is pressed
 procedure ReadlnConsole(Format: PXChar);
 var
   C: XChar;
@@ -494,22 +506,34 @@ begin
   end;
 end;
 
-// Enable the Console
 procedure EnabledConsole;
 begin
-  // IRQ 1 is captured by BSP
-  IrqOn(1);
+  {$IFDEF ToroHeadLess}
+  {$ELSE}
+    IrqOn(1);
+  {$ENDIF}
 end;
 
-// Disable Console
 procedure DisabledConsole;
 begin
-  IrqOff(1);
+  {$IFDEF ToroHeadLess}
+  {$ELSE}
+    IrqOff(1);
+  {$ENDIF}
 end;
 
 procedure ConsoleInit;
 begin
-  CaptureInt(33,@IrqKeyb);
+  {$IFDEF UseSerialasConsole}
+    write_portb ($83, BASE_COM_PORT+3);
+    write_portb (0, BASE_COM_PORT+1);
+    write_portb (1, BASE_COM_PORT);
+    write_portb (3, BASE_COM_PORT+3);
+  {$ENDIF}
+  {$IFDEF ToroHeadLess}
+  {$ELSE}
+    //CaptureInt(33,@IrqKeyb);
+  {$ENDIF}
 end;
 
 end.

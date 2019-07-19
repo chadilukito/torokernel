@@ -1,7 +1,7 @@
 //
 // Fat.pas
 //
-// This is a driver for fat16. It is meant to work with the vfat interface
+// This unit contains the driver for fat16. It is meant to work with the vfat interface
 // that qemu provides.
 //
 // Copyright (c) 2003-2018 Matias Vara <matiasevara@gmail.com>
@@ -28,9 +28,10 @@ interface
 
 //{$DEFINE DebugFatFS}
 
-uses Console,Arch,FileSystem,Process,Debug,Memory;
+uses
+  {$IFDEF EnableDebug} Debug, {$ENDIF}
+  Console, Arch, FileSystem, Process, Memory;
 
-// driver callbacks for the kernel
 var
   FatDriver: TFileSystemDriver;
 
@@ -96,7 +97,6 @@ type
 
   fat_inode_info = record
     dir_entry : pdirectory_entry ;
-    bh : PBufferHead ;
     ino : dword ;
     sb : psb_fat ;
     NextInode: pfat_inode_info;
@@ -115,21 +115,22 @@ type
     name3 : array[1..4] of char ;
   end;
 
-// Load the fat table in memory
 function FatLoadTable (sb: PSuperBlock): boolean ;
 var
   j: LongInt;
   sb_fat : psb_fat;
   bh : PBufferHead;
-  pfat : ^Byte;
+  pfat, tmpfat : ^Byte;
 begin
   Result := False;
   sb_fat := sb.SbInfo;
   pfat := ToroGetMem(sb_fat^.pbpb^.bpb_fatsz16 * sb_fat^.pbpb^.bpb_bytspersec);
-  for j:= 1 to sb_fat^.pbpb^.bpb_fatsz16 do
+  Panic ( pfat = nil, 'FatLoadTable: out of memory', []);
+  tmpfat := pfat;
+  for j := 1 to (1 + sb_fat^.pbpb^.bpb_fatsz16 - 1) do
   begin
-   bh := GetBlock(sb.BlockDevice, j,sb_fat^.pbpb^.bpb_bytspersec);
-   if bh=nil then
+   bh := GetBlock(sb.BlockDevice, j, sb_fat^.pbpb^.bpb_bytspersec);
+   if bh = nil then
    begin
      WriteConsoleF('FatLoadTable: Error when loading Fat\n',[]);
      Exit;
@@ -137,11 +138,10 @@ begin
    Move(bh^.data^, pfat^, sb_fat^.pbpb^.bpb_bytspersec);
    Inc(pfat, sb_fat^.pbpb^.bpb_bytspersec);
   end;
-  sb_fat^.pfat := pfat;
+  sb_fat^.pfat := tmpfat;
   Result := True;
 end;
 
-// Read Super Block from a FAT partition
 function FatReadSuper (Super: PSuperBlock): PSuperBlock;
 var
   bh: PBufferHead;
@@ -156,6 +156,7 @@ begin
   if (pfatboot.BS_FilSysType[1] = 'F') and (pfatboot.BS_FilSysType[5] = '6') then
   begin
     pfat := ToroGetMem(sizeof(super_fat));
+    Panic(pfat = nil, 'FatReadSuper: out of memory', []);
     pfat.InodesQueue:= nil;
     pfat.InodesQueueTail:= nil;
     pfat.pbpb := pfatboot;
@@ -180,281 +181,379 @@ begin
   Result := Super;
 end;
 
-procedure UnicodeToUnix (longname: pvfatdirectory_entry; Dest: Pchar);
+function UnicodeToUnix (longname: pvfatdirectory_entry; Dest: Pchar; start: LongInt): LongInt;
 var
-  count, i: dword ;
+  count: dword ;
 begin
-  i:= 0;
-  for count := 0 to 4 do
+  Result := start;
+  for count := 1 downto 0 do
   begin
-   if longname^.name1[(count*2)+1] = #0 then
-   begin
-    Exit
-   end
-   else
-    begin
-     Dest[i] := longname^.name1[(count*2)+1] ;
-     Inc(i);
-    end;
+    if (longname^.name3[(count*2)+1] = #0) or (longname^.name3[(count*2)+1] = #$ff) then
+      continue;
+    Dest[Result] :=  longname^.name3[(count*2)+1];
+    Inc(Result);
   end;
-  for count := 0 to 5 do
+  for count := 5 downto 0 do
   begin
-   if longname^.name2[(count*2)+1] = #0 then
-   begin
-    Exit
-   end
-   else
-    begin
-     Dest[i] := longname^.name2[(count*2)+1] ;
-     Inc(i);
-    end;
+    if (longname^.name2[(count*2)+1] = #0) or (longname^.name2[(count*2)+1] = #$ff) then
+      continue;
+    Dest[Result] := longname^.name2[(count*2)+1] ;
+    Inc(Result);
   end;
-  for count := 0 to 1 do
+  for count := 4 downto 0 do
   begin
-   if longname^.name3[(count*2)+1] = #0 then
-   begin
-    Exit
-   end
-   else
-    begin
-     Dest[i] :=  longname^.name3[(count*2)+1] ;
-     Inc(i);
-    end;
+    if (longname^.name1[(count*2)+1] = #0) or (longname^.name1[(count*2)+1] = #$ff) then
+      continue;
+    Dest[Result] := longname^.name1[(count*2)+1] ;
+    Inc(Result);
   end;
-  Dest[i]:= #0;
 end;
 
 procedure UnixName (fatname: pchar; Dest: Pchar);
-var tmp : array[0..11] of char ;
-    count ,ret: dword ;
+var
+  tmp: array[0..11] of char;
+  count, ret: dword;
 begin
   FillByte (tmp, 11, 32);
   for count := 0 to 7 do
   begin
-   if fatname[count] = #32 then
-     break;
-   tmp[count] := fatname[count];
+    if fatname[count] = #32 then
+      break;
+    tmp[count] := fatname[count];
   end;
   Inc(count);
-
- if fatname[8] = #32 then
- begin
+  if fatname[8] = #32 then
+  begin
+    Move(tmp, Dest^, count);
+    Dest[count] := #0;
+    Exit;
+  end;
+  tmp[count] := #46 ;
+  Inc(count);
+  for ret := 8 to 11 do
+  begin
+    if fatname[ret]= #32 then
+      break
+    else
+      tmp[count] := fatname[ret];
+    Inc(count);
+  end;
   Move(tmp, Dest^, count);
   Dest[count] := #0;
-  Exit;
- end;
-
- tmp[count] := #46 ;
- count += 1;
-
- for ret := 8 to 11 do
- begin
-  if fatname[ret]= #32 then break
-  else tmp[count] := fatname[ret];
-  count += 1;
- end;
-
- Move(tmp, Dest^, count);
- Dest[count] := #0;
 end;
 
-//
-// Alloca a new Inode Fat and enqueue it
-function AllocInodeFat(sb: psb_fat; entry: pdirectory_entry; bh: PBufferHead): pfat_inode_info;
+function AllocInodeFat(sb: psb_fat; entry: pdirectory_entry): pfat_inode_info;
 var
   tmp : pfat_inode_info;
 begin
-  tmp := ToroGetMem(sizeof(pfat_inode_info));
+  tmp := ToroGetMem(sizeof(fat_inode_info));
   if tmp = nil then
   begin
    Result := nil;
    Exit;
   end;
   tmp.dir_entry := entry ;
-  tmp.bh := bh ;
   tmp.ino := entry.FATEntry ;
   tmp.sb := sb ;
-  // enqueue the inode
   tmp.NextInode := nil;
   if sb.InodesQueue = nil then
-   sb.InodesQueue := tmp;
+    sb.InodesQueue := tmp;
   sb.InodesQueueTail.NextInode := tmp;
   sb.InodesQueueTail := tmp;
   Result := tmp;
 end;
 
-// find a name in a directory
-function FindDir (bh: PBufferHead; name: pchar; var res : pdirectory_entry): Boolean;
-var count  , cont : dword ;
-    pdir : pdirectory_entry ;
-    plgdir : pvfatdirectory_entry ;
-    buff : array[0..254] of char;
-    lgcount : dword ;
-    J: LongInt;
-    ch: Byte;
+
+function StrCmpforFat(buff, name: pchar; len: Longint): Boolean;
+var
+ tmp: pchar;
+ j: Longint;
+begin
+  Result := True;
+  if StrLen(buff) <> StrLen(name) then
+  begin
+    Result:= False;
+    Exit;
+  end;
+  tmp := buff + len -1;
+  for j:= 0 to len-1 do
+  begin
+    if name^ <> tmp^ then
+    begin
+      Result := False;
+      Exit;
+    end;
+    Inc(name);
+    Dec(tmp);
+  end;
+end;
+
+function GetNextCluster (pfat: psb_fat; Cluster: DWORD): Word ;
+var
+  lsb, msb: byte;
+  ret: word;
+  offset: dword;
+begin
+  offset := Cluster * sizeof(Word);
+  lsb := PByte(Pointer(pfat.pfat) + offset)^;
+  msb := PByte(Pointer(pfat.pfat) + offset + 1)^;
+  ret := (msb shl 8) or lsb;
+  if ret >= $FFF8 then
+    Result := LAST_SECTOR_FAT
+  else
+    Result := ret;
+end;
+
+function FindDirinDir(FatInode: pfat_inode_info; Ino: PInode; name: pchar; out res: pdirectory_entry): Boolean;
+var 
+  buff: array[0..254] of char;
+  start, j, i: Dword;
+  pdir: pdirectory_entry;
+  pdirlong: pvfatdirectory_entry;
+  ch: Byte;
+  pfat:psb_fat;
+  NextCluster, Sector: LongInt;
+  bh: PBufferHead;
 begin
   Result := False;
-  res := nil ;
-  pdir := bh.data;
-  count := 1;
-  lgcount := 0;
-  repeat
-    case pdir.name[1] of
-    #0 : Exit;
-    #$E5 : lgcount := 0 ;
-    else
+  res := nil;
+  pfat := Ino.SuperBlock.SbInfo;
+  nextCluster := FatInode.dir_entry.FATEntry;
+  start := 0;
+  while nextCluster <> LAST_SECTOR_FAT do
+  begin
+    Sector := (nextCluster - 2) * pfat.pbpb.BPB_SecPerClus + ((pfat.pbpb.BPB_FATSz16 *2) + pfat.pbpb.BPB_RsvdSecCnt + (pfat.pbpb.BPB_RootEntCnt * 32) div pfat.pbpb.BPB_BytsPerSec);
+    for i:= 0 to pfat.pbpb.BPB_SecPerClus-1 do
+    begin
+      bh := GetBlock(Ino.SuperBlock.BlockDevice, Sector + i, Ino.SuperBlock.BlockSize);
+      pdir := Pointer(bh.data);
+      while PtrUInt(pdir) < PtrUInt(Pointer(bh.data + bh.size))  do
       begin
-       // long name entry
-       if (pdir^.attr = $0F) and (count <= (512 div sizeof (directory_entry))) then
-          lgcount += 1
-      else
-       begin
-        if (lgcount > 0 ) then
-         begin
-          plgdir := pointer (pdir);
-          for cont := 0 to (lgcount-1) do
+        if (pdir.name[1] = #0) or (pdir.name[1] = #$E5)  then
+        begin
+          Inc(pdir);
+          continue;
+        end;
+        // long entries
+        if pdir.attr = $0F then
+        begin
+          pdirlong := Pointer(pdir);
+          while (pdirlong.res <> $41) and (pdirlong.res <> 1) and (PtrUInt(pdirlong) < PtrUInt(Pointer(bh.data + bh.size))-1) do
           begin
-           Dec(plgdir);
-           // TODO: buff is 255 long
-           UnicodeToUnix (plgdir, @buff);
+            start := UnicodeToUnix (pdirlong, buff, start);
+            Inc(pdirlong);
           end;
-          // convert buff to upper case
+          if PtrUInt(pdirlong) > PtrUInt(Pointer(bh.data + bh.size))-1 then
+          begin
+            pdir := Pointer(pdirlong);
+            continue;
+          end;
+          start := UnicodeToUnix (pdirlong, buff, start);
+          buff[start] := #0;
           for j:= 0 to (StrLen(@buff)-1) do
           begin
-           if (buff[j] >= 'a') or (buff[j] <= 'z') then
-           begin
-            ch := Byte(buff[j]) xor $20;
-            buff[j] := Char(ch);
-           end;
+            if (buff[j] >= 'a') or (buff[j] <= 'z') then
+            begin
+              ch := Byte(buff[j]) xor $20;
+              buff[j] := Char(ch);
+            end;
           end;
-          buff[StrLen(@buff)] := #0;
-          // check and exit
-          if (StrLen(@buff) <> 0) and (StrCmp(@buff, name, StrLen(name))) then
+          Inc(pdirlong);
+          if PtrUInt(pdirlong) > PtrUInt(Pointer(bh.data + bh.size))-1 then
           begin
-           res := pdir ;
-           Result := True;
-           Exit;
+            pdir := Pointer(pdirlong);
+            continue;
           end;
-         end
-          else
-           begin
-             UnixName (@pdir.name, @buff);
-             if (StrLen(@buff) <> 0) and StrCmp(@buff, name, StrLen(name)) then
-             begin
-              res := pdir ;
+          if (StrLen(@buff) <> 0) and (StrCmpforFat(@buff, name, StrLen(name))) then
+          begin
+            res := Pointer(pdirlong);
+            Result := True;
+            Exit;
+          end;
+          pdir := Pointer(pdirlong);
+          start := 0;
+        // short entries
+        end else
+        begin
+          if start <> 0 then
+          begin
+            if (StrLen(@buff) <> 0) and (StrCmpforFat(@buff, name, StrLen(name))) then
+            begin
+              res := pdir;
+              Result := True;
+              Exit;
+            end;
+            start := 0
+          end else
+          begin
+            UnixName (@pdir.name, @buff);
+            if (StrLen(@buff) <> 0) and StrCmp(@buff, name, StrLen(name)) then
+            begin
+              res := pdir;
               Result := true;
               Exit;
-             end;
-           end;
-        lgcount := 0 ;
-       end;
+            end;
+          end;
+        end;
+        Inc(pdir);
       end;
+      PutBlock(Ino.SuperBlock.BlockDevice, bh);
     end;
-    Inc(pdir);
-    Inc(count);
-  until (count > (512 div sizeof (directory_entry))) ;
+    nextCluster := GetNextCluster(pfat, nextCluster);
+    end;
 end;
 
-// convert a fat entry to a sector number
-function GetFatSector (pfat: psb_fat; sector: DWORD): Word ;
-var lsb , msb  : byte ;
-    offset: dword ;
-    ret : word ;
-begin
- Sector := ((Sector - ((pfat.pbpb.BPB_FATSz16 *2) + pfat.pbpb.BPB_RsvdSecCnt + (pfat.pbpb.BPB_RootEntCnt * 32) div pfat.pbpb.BPB_BytsPerSec)) div pfat.pbpb.BPB_SecPerClus ) + 2;
- offset := (sector * 3 ) shr 1 ;
- lsb := PByte(Pointer(pfat.pfat) + offset)^;
- msb := PByte(Pointer(pfat.pfat) + offset + 1)^;
- if (sector mod 2 ) <>  0  then
-  ret := ((msb shl 8 ) or lsb ) shr 4
- else
- ret := ((msb shl 8) or lsb ) and $FFF ;
- if (ret = $FFF) then
-  Result := LAST_SECTOR_FAT
- else
-  Result := (ret - 2) * pfat.pbpb.BPB_SecPerClus + ((pfat.pbpb.BPB_FATSz16 *2) + pfat.pbpb.BPB_RsvdSecCnt + (pfat.pbpb.BPB_RootEntCnt * 32) div pfat.pbpb.BPB_BytsPerSec);
-end;
-
-// look up a Name in a Inode directory
-function FatLookUpInode(Ino: PInode; const Name: AnsiString): PInode;
+function FindDirinRoot(Ino: PInode; name: pchar; out res: pdirectory_entry): Boolean;
 var
-  j, blk: LongInt;
+  buff: array[0..254] of char;
+  start, j, blk: Dword;
+  pfat: psb_fat;
+  pdir: pdirectory_entry;
+  pdirlong: pvfatdirectory_entry;
+  ch: Byte;
+  bh: PBufferHead;
+begin
+  Result := False;
+  res := nil;
+  pfat := Ino.SuperBlock.SbInfo;
+  start := 0;
+  for blk := pfat.RootDirStart to pfat.RootDirEnd do
+  begin
+    bh := GetBlock (Ino.SuperBlock.BlockDevice, blk, Ino.SuperBlock.BlockSize);
+    pdir := Pointer(bh.data);
+    while PtrUInt(pdir) < PtrUInt(Pointer(bh.data + bh.size))  do
+    begin
+      if (pdir.name[1] = #0) or (pdir.name[1] = #$E5)  then
+      begin
+        Inc(pdir);
+        continue;
+      end;
+      // long entries
+      if pdir.attr = $0F then
+      begin
+        pdirlong := Pointer(pdir);
+        while (pdirlong.res <> $41) and (pdirlong.res <> 1) and (PtrUInt(pdirlong) < PtrUInt(Pointer(bh.data + bh.size))-1) do
+        begin
+          start := UnicodeToUnix (pdirlong, buff, start);
+          Inc(pdirlong);
+        end;
+        if PtrUInt(pdirlong) > PtrUInt(Pointer(bh.data + bh.size))-1 then
+        begin
+          pdir := Pointer(pdirlong);
+          continue;
+        end;
+        start := UnicodeToUnix (pdirlong, buff, start);
+        buff[start] := #0;
+        for j:= 0 to (StrLen(@buff)-1) do
+        begin
+          if (buff[j] >= 'a') or (buff[j] <= 'z') then
+          begin
+            ch := Byte(buff[j]) xor $20;
+            buff[j] := Char(ch);
+          end;
+        end;
+        Inc(pdirlong);
+        // not sure how to handle this
+        if PtrUInt(pdirlong) > PtrUInt(Pointer(bh.data + bh.size))-1 then
+        begin
+          pdir := Pointer(pdirlong);
+          continue;
+        end;
+        if (StrLen(@buff) <> 0) and (StrCmpforFat(@buff, name, StrLen(name))) then
+        begin
+          res := Pointer(pdirlong);
+          Result := True;
+          Exit;
+        end;
+        pdir := Pointer(pdirlong);
+        start := 0;
+      // short entries
+      end else
+      begin
+        if start <> 0 then
+        begin
+          if (StrLen(@buff) <> 0) and (StrCmpforFat(@buff, name, StrLen(name))) then
+          begin
+            res := pdir;
+            Result := True;
+            Exit;
+          end;
+          start := 0
+        end else
+        begin
+          UnixName (@pdir.name, @buff);
+          if (StrLen(@buff) <> 0) and StrCmp(@buff, name, StrLen(name)) then
+          begin
+            res := pdir;
+            Result := true;
+            Exit;
+          end;
+        end;
+      end;
+      Inc(pdir);
+    end;
+  end;
+end;
+
+function FatLookUpInode(Ino: PInode; Name: PXChar): PInode;
+var
+  j: LongInt;
   ch: Byte;
   NameFat: Pchar;
-  bh: PBufferHead;
   pdir:  pdirectory_entry;
   pfat: psb_fat;
   FatInode: pfat_inode_info;
-  nextCluster, nextSector: LongInt;
 begin
   Result := nil;
   NameFat := ToroGetMem(Length(Name)+1);
+  if NameFat = nil then
+  begin
+    Exit;
+  end;
   pfat := Ino.SuperBlock.SbInfo;
-  // conver Name to upper case
-  for j:= 1 to Length(Name) do
+  for j := 0 to (Length(Name) - 1) do
   begin
    if (Name[j] >= 'a') or (Name[j] <= 'z') then
    begin
      ch := Byte(Name[j]) xor $20;
-     NameFat[j-1] := Char(ch);
+     NameFat[j] := Char(ch);
    end else
    begin
-    NameFat[j-1] := Name[j];
+     NameFat[j] := Name[j];
    end;
   end;
   NameFat[Length(Name)] := #0;
-  // inode root
   if Ino.ino = 1 then
   begin
-    // root directory
-    for blk := pfat.RootDirStart to pfat.RootDirEnd do
+    if FindDirinRoot (Ino, NameFat, pdir) then
     begin
-     bh := GetBlock (Ino.SuperBlock.BlockDevice, blk, Ino.SuperBlock.BlockSize);
-     if FindDir (bh, NameFat, pdir) then
-     begin
-      AllocInodeFat(pfat, pdir, bh);
+      AllocInodeFat(pfat, pdir);
       Result := GetInode(pdir.FATEntry);
-      PutBlock(Ino.SuperBlock.BlockDevice, bh);
-      ToroFreeMem(NameFat);
-      Exit;
-     end;
-     PutBlock(Ino.SuperBlock.BlockDevice, bh);
     end;
     ToroFreeMem(NameFat);
-    Exit
+    Exit;
   end else
   begin
-   FatInode := pfat.InodesQueue;
-
-   while (FatInode <> nil) do
-   begin
-    if FatInode.ino = Ino.ino then
+    FatInode := pfat.InodesQueue;
+    while (FatInode <> nil) do
     begin
-     nextCluster :=  FatInode.dir_entry.FATEntry;
-     nextSector :=  (nextCluster - 2) * pfat.pbpb.BPB_SecPerClus + ((pfat.pbpb.BPB_FATSz16 *2) + pfat.pbpb.BPB_RsvdSecCnt + (pfat.pbpb.BPB_RootEntCnt * 32) div pfat.pbpb.BPB_BytsPerSec);
-     while (nextSector <> LAST_SECTOR_FAT) do
-     begin
-      bh := GetBlock(Ino.SuperBlock.BlockDevice, nextSector, Ino.SuperBlock.BlockSize);
-      if FindDir(bh, NameFat, pdir) then
+      if FatInode.ino = Ino.ino then
       begin
-       AllocInodeFat(pfat, pdir, bh);
-       Result := GetInode(pdir.FATEntry);
-       PutBlock(Ino.SuperBlock.BlockDevice, bh);
-       ToroFreeMem(NameFat);
-       Exit;
+        if FindDirinDir(FatInode, Ino, NameFat, pdir) then
+        begin
+          AllocInodeFat(pfat, pdir);
+          Result := GetInode(pdir.FATEntry);
+        end;
+        ToroFreeMem(NameFat);
+        Exit;
       end;
-      PutBlock(Ino.SuperBlock.BlockDevice, bh);
-      nextSector := GetFatSector(pfat, nextSector);
-     end;
+      FatInode := FatInode.NextInode;
     end;
-   FatInode := FatInode.NextInode;
-   end;
-  ToroFreeMem(NameFat);
-  Exit;
+    ToroFreeMem(NameFat);
+    Exit;
   end;
 end;
 
-// Read a inode from the fat inode queue
 procedure FatReadInode(Inode: PInode);
 var
   pfat: psb_fat;
@@ -462,7 +561,6 @@ var
   rootSize: LongInt;
 begin
   pfat := Inode.SuperBlock.SbInfo;
-
   if Inode.ino = 1 then
   begin
     Inode.InoInfo:= nil;
@@ -472,100 +570,105 @@ begin
     Inode.Count:= 0;
     Exit;
   end;
-
   pfat := Inode.SuperBlock.SbInfo;
   FatInode := pfat.InodesQueue;
-
-  while (FatInode <> nil) do
+  while FatInode <> nil do
   begin
-   if FatInode.ino = Inode.ino then
-   begin
-    Inode.InoInfo:= FatInode;
-    Inode.Size := FatInode.dir_entry.size;
-
-    if FatInode.dir_entry.attr and FAT_DIR = FAT_DIR then
-      Inode.Mode := INODE_DIR
-    else if FatInode.dir_entry.attr and FAT_FILE = FAT_FILE then
-      Inode.Mode:= INODE_REG;
-    // TODO: add time
-    Inode.ATime := 0;
-    Inode.MTime := 0;
-    Inode.CTime := 0;
-    Inode.Dirty:= false;
-    Exit;
-   end;
-   FatInode := FatInode.NextInode;
+    if FatInode.ino = Inode.ino then
+    begin
+      Inode.InoInfo:= FatInode;
+      Inode.Size := FatInode.dir_entry.size;
+      if FatInode.dir_entry.attr and FAT_DIR = FAT_DIR then
+        Inode.Mode := INODE_DIR
+      else if FatInode.dir_entry.attr and FAT_FILE = FAT_FILE then
+        Inode.Mode:= INODE_REG;
+      // TODO: add time
+      Inode.ATime := 0;
+      Inode.MTime := 0;
+      Inode.CTime := 0;
+      Inode.Dirty:= false;
+      Exit;
+    end;
+    FatInode := FatInode.NextInode;
   end;
 end;
 
 
-function FatReadFile(FileDesc: PFileRegular; Count: longint; Buffer: Pointer): longint;
+function FatReadFile(FileDesc: PFileRegular; Count: LongInt; Buffer: Pointer): longint;
 var
-  tmp: pfat_inode_info;
-  initblk, initoff, nextCluster, nextSector, Cnt: DWORD;
-  j: LongInt;
   bh: PBufferHead;
+  Cnt: DWORD;
+  initblk, initoff, startblk: DWORD;
+  j: LongInt;
+  nextCluster, Sector: DWORD;
   pfat: psb_fat;
+  tmp: pfat_inode_info;
 begin
   if FileDesc.FilePos + Count > FileDesc.Inode.Size then
   begin
-    {$IFDEF DebugFS} WriteDebug('Ext2ReadFile: reading after end, pos:%d, size:%d\n', [FileDesc.FilePos, FileDesc.Inode.Size ]); {$ENDIF}
+    {$IFDEF DebugFat} WriteDebug('FatReadFile: reading after end, pos:%d, size:%d\n', [FileDesc.FilePos, FileDesc.Inode.Size ]); {$ENDIF}
     Count:= FileDesc.Inode.Size - FileDesc.FilePos;
   end;
-
   pfat := FileDesc.Inode.SuperBlock.SbInfo;
-
   tmp := FileDesc.Inode.InoInfo;
-  initblk := FileDesc.FilePos div FileDesc.Inode.SuperBlock.BlockSize;
+  initblk := FileDesc.FilePos div (FileDesc.Inode.SuperBlock.BlockSize * pfat.pbpb.BPB_SecPerClus);
   initoff := FileDesc.FilePos mod FileDesc.Inode.SuperBlock.BlockSize;
+  startblk := (FileDesc.FilePos mod (FileDesc.Inode.SuperBlock.BlockSize * pfat.pbpb.BPB_SecPerClus)) div FileDesc.Inode.SuperBlock.BlockSize;
   nextCluster := tmp.dir_entry.FATEntry;
-
   If initblk = 0 then
-   nextSector := (nextCluster - 2) * pfat.pbpb.BPB_SecPerClus + ((pfat.pbpb.BPB_FATSz16 *2) + pfat.pbpb.BPB_RsvdSecCnt + (pfat.pbpb.BPB_RootEntCnt * 32) div pfat.pbpb.BPB_BytsPerSec)
+   Sector := (nextCluster - 2) * pfat.pbpb.BPB_SecPerClus + ((pfat.pbpb.BPB_FATSz16 *2) + pfat.pbpb.BPB_RsvdSecCnt + (pfat.pbpb.BPB_RootEntCnt * 32) div pfat.pbpb.BPB_BytsPerSec)
   else
-   begin
-    for j := nextCluster to (nextCluster + initblk - 1 ) do
+  begin
+    for j := 0 to initblk do
     begin
-     nextSector := GetFatSector(FileDesc.Inode.SuperBlock.SbInfo, j);
-     if nextSector = LAST_SECTOR_FAT then
-     begin
-      Result:= 0;
-      Exit;
-     end;
+      nextCluster := GetNextCluster(FileDesc.Inode.SuperBlock.SbInfo, nextCluster);
+      if Sector = LAST_SECTOR_FAT then
+      begin
+        Result:= 0;
+        Exit;
+      end;
     end;
-   end;
-
+    Sector := (nextCluster - 2) * pfat.pbpb.BPB_SecPerClus + ((pfat.pbpb.BPB_FATSz16 *2) + pfat.pbpb.BPB_RsvdSecCnt + (pfat.pbpb.BPB_RootEntCnt * 32) div pfat.pbpb.BPB_BytsPerSec)
+  end;
   cnt := Count ;
-
   repeat
-   bh := GetBlock(FileDesc.Inode.SuperBlock.BlockDevice, nextSector, FileDesc.Inode.SuperBlock.BlockSize);
-   if bh = nil then
-   begin
-    Break;
-   end;
-   if (cnt > FileDesc.Inode.SuperBlock.BlockSize) then
-   begin
-    Move (PByte(bh.data+initoff)^, Pbyte(Buffer)^, FileDesc.Inode.SuperBlock.BlockSize);
-    Inc(FileDesc.FilePos, FileDesc.Inode.SuperBlock.BlockSize);
-    initoff := 0 ;
-    Dec(cnt, FileDesc.Inode.SuperBlock.BlockSize);
-    Inc(Buffer, FileDesc.Inode.SuperBlock.BlockSize);
-   end else
-   begin
-    Move(PByte(bh.data+initoff)^, Pbyte(Buffer)^, cnt);
-    initoff := 0 ;
-    Inc(FileDesc.FilePos, cnt);
-    cnt := 0 ;
-   end;
-   PutBlock(FileDesc.Inode.SuperBlock.BlockDevice, bh);
-   nextSector :=  GetFatSector(FileDesc.Inode.SuperBlock.SbInfo,nextSector);
-   if nextSector = LAST_SECTOR_FAT then
-   begin
-    break;
-   end;
+    // read a whole cluster
+    for j:= startblk to pfat.pbpb.BPB_SecPerClus-1 do
+    begin
+      bh := GetBlock(FileDesc.Inode.SuperBlock.BlockDevice, Sector + j, FileDesc.Inode.SuperBlock.BlockSize);
+      {$IFDEF DebugFat} WriteDebug('FatReadFile: nextSector: %d, ClusterSize: %d, Count: %d, startblk: %d, initoff: %d\n',[Sector, FileDesc.Inode.SuperBlock.BlockSize*pfat.pbpb.BPB_SecPerClus, cnt, startblk, initoff]); {$ENDIF}
+      if bh = nil then
+      begin
+        Result := Count - cnt;
+        Exit;
+      end;
+      if cnt > (FileDesc.Inode.SuperBlock.BlockSize) then
+      begin
+        Move (PByte(bh.data+initoff)^, Pbyte(Buffer)^, FileDesc.Inode.SuperBlock.BlockSize);
+        Inc(FileDesc.FilePos, FileDesc.Inode.SuperBlock.BlockSize);
+        initoff := 0;
+        startblk := 0;
+        Dec(cnt, FileDesc.Inode.SuperBlock.BlockSize);
+        Inc(Buffer, FileDesc.Inode.SuperBlock.BlockSize);
+        PutBlock(FileDesc.Inode.SuperBlock.BlockDevice, bh);
+      end else
+      begin
+        Move(PByte(bh.data+initoff)^, Pbyte(Buffer)^, cnt);
+        initoff := 0;
+        startblk := 0;
+        Inc(FileDesc.FilePos, cnt);
+        cnt := 0 ;
+        PutBlock(FileDesc.Inode.SuperBlock.BlockDevice, bh);
+        Break;
+      end;
+    end;
+    nextCluster := GetNextCluster(FileDesc.Inode.SuperBlock.SbInfo, nextCluster);
+    if nextCluster = LAST_SECTOR_FAT then
+      break;
+    Sector := (nextCluster - 2) * pfat.pbpb.BPB_SecPerClus + ((pfat.pbpb.BPB_FATSz16 *2) + pfat.pbpb.BPB_RsvdSecCnt + (pfat.pbpb.BPB_RootEntCnt * 32) div pfat.pbpb.BPB_BytsPerSec);
   until cnt = 0;
-
   Result := Count - cnt;
+  {$IFDEF DebugFat} WriteDebug('FatReadFile: Result: %d\n',[Result]); {$ENDIF}
 end;
 
 initialization
@@ -575,5 +678,7 @@ initialization
   FatDriver.ReadInode := @FatReadInode;
   FatDriver.LookUpInode := @FatLookUpInode;
   FatDriver.ReadFile := @FatReadFile;
+  FatDriver.OpenFile := nil;
+  FatDriver.CloseFile := nil;
   RegisterFilesystem(@FatDriver);
 end.

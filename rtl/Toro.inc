@@ -10,7 +10,14 @@
 {$ENDIF}
 //{$DEFINE cpui386}
 //{$DEFINE CPUX86_64}
-//{$DEFINE DEBUG}
+{$MACRO ON}
+//{$DEFINE EnableDebug}
+{$DEFINE EnablePing}
+{$DEFINE DebugRingSize:=1*1024*1024}
+//{$DEFINE UseSerialasConsole}
+//{$DEFINE ShutdownWhenFinished}
+//{$DEFINE ProfileBootTime}
+//{$DEFINE ToroHeadLess}
 //{$DEFINE DebugCrash}
 //{$DEFINE DebugArch}
 //{$DEFINE DebugFS}

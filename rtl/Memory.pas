@@ -2,19 +2,11 @@
 // Memory.pas
 //
 // Allocator is working with a SX (Size indeX) that distributes block size from 8 bytes up to multi-TB
-// BlockSize increments by Power2
-// Memory allocator directory maintains lists of free blocks pointers of sizes 8, 16, 32, 64, 128, ..., 1K, 2K, 4K, 1MB, (compiling for Toro, blocks up to multi-TB)
-// Memory allocator maintains one directory per CPU
+// BlockSize increments by Power2.
+// Memory allocator directory maintains lists of free blocks pointers of sizes 8, 16, 32, 64, 128, ..., 1K, 2K, 4K, 1MB, (compiling for Toro, blocks up to multi-TB).
+// Memory allocator maintains one directory per CPU.
 //
-// Changes :
-//
-// 2017.01.18 Making use of DisableInt() and RestoreInt()
-// 2016.12.18 Fixed a major bug when a chunk is split 
-// 2009.11.01 CPU Cache's Manager Implementation
-// 2009.06.09 XMLHeapNuma adapted for TORO by Matias Vara (XMLRAD UltimX - http://xmlrad.sourceforge.net)
-// 2009.05.20 Slab allocator is replaced with Cache Allocator
-//
-// Copyright (c) 2003-2016 Matias Vara <matiasevara@gmail.com>
+// Copyright (c) 2003-2018 Matias Vara <matiasevara@gmail.com>
 // All Rights Reserved
 //
 // This program is free software: you can redistribute it and/or modify
@@ -44,7 +36,7 @@ unit Memory;
 interface
 
 uses
-  {$IFDEF DEBUG} Debug, {$ENDIF}
+  {$IFDEF EnableDebug} Debug, {$ENDIF}
   Arch, Process, Console;
 
 const
@@ -93,11 +85,11 @@ type
     MaxAllocBlockCount: Cardinal; // 1024 default
     CurrentVirtualAlloc: Integer; // for this BlockList
     TotalVirtualAlloc: Integer; // for this BlockList
-  	Current: Cardinal; 	// Counter to track the current number of allocated blocks
+    Current: Cardinal; 	// Counter to track the current number of allocated blocks
     Total: Integer;     // Counter to track the total number of memory allocations
-  	Capacity: Cardinal;  // Capacity of the List
+    Capacity: Cardinal;  // Capacity of the List
     Count: Cardinal;			// Actual number of item in List
-  	List: PPointerArray;
+    List: PPointerArray;
   end;
   PBlockList = ^TBlockList;
   TMemoryAllocator = record // per CPU
@@ -177,9 +169,9 @@ const
 
 var
 {$IFDEF FPC}
-	ToroMemoryManager: TMemoryManager;
+  ToroMemoryManager: TMemoryManager;
 {$ELSE}
-	ToroMemoryManager: TMemoryManagerEx;
+  ToroMemoryManager: TMemoryManagerEx;
 {$ENDIF}
 {$IFDEF HEAP_STATS}
   CurrentVirtualAllocated: Int64;
@@ -187,7 +179,7 @@ var
 {$IFDEF HEAP_STATS2}
   TotalVirtualAllocated: Int64;
 {$ENDIF}
-  MapSX: array[0..MAPSX_COUNT-1] of Byte; // every Index is calculated from Size div 8   
+  MapSX: array[0..MAPSX_COUNT-1] of Byte; // every Index is calculated from Size div 8
   MIN_GETSX: Byte;
 
 // Returns the upper index for a specific Size, to ensure that any block size requested would fit at least the returned index
@@ -205,8 +197,8 @@ begin
     Exit;
   end;
   Result := MIN_GETSX;
-	while { (Result < MAX_SX-1) and } (DirectorySX[Result] < Size) do
-  	Inc(Result);
+  while { (Result < MAX_SX-1) and } (DirectorySX[Result] < Size) do
+    Inc(Result);
 end;
 
 function GetPointerSize(P: Pointer): Integer;
@@ -278,7 +270,7 @@ begin
   end else begin
     CPU := 0;
     SX := 0;
-    Size := (Header shr 2)*8; 
+    Size := (Header shr 2)*8;
   end;
   FlagFree := Header and FLAG_FREE;
 end;
@@ -313,6 +305,10 @@ begin
   if Result = nil then
   begin
     Result := ToroGetMem(XHEAP_INITIAL_CAPACITY);
+    if Result = nil then
+    begin
+      Exit;
+    end;
     Result.MemoryAllocator := CPU;
   end;
   XHeapReset(Result);
@@ -347,7 +343,7 @@ begin
   if Heap.ChunkIndex >= XHEAP_MAX_CHUNKS-1 then
     Exit;
   Inc(Heap.ChunkIndex);
-  Result:= ToroGetMem(XHEAP_CHUNK_CAPACITY);
+  Result := ToroGetMem(XHEAP_CHUNK_CAPACITY);
   if Result = nil then
     Exit;
   Heap.Chunks[Heap.ChunkIndex] := Result;
@@ -368,7 +364,7 @@ var
   SizeMod8: PtrUInt;
 begin
   SizeMod8 := Size mod 8;
-  if SizeMod8 > 0 then 
+  if SizeMod8 > 0 then
     Inc(Size, 8-SizeMod8); // Align to 8 byte upper boundary
   if Size+BLOCK_HEADER_SIZE >= MINIMUM_VIRTUALALLOC_SIZE then
   begin
@@ -378,6 +374,10 @@ begin
       Exit;
     end;
     Result := ToroGetMem(Size);
+    if Result = nil then
+    begin
+      Exit;
+    end;
     Heap.LargeBlocks[Heap.LargeBlockCount] := Result;
     // NOTE: for large blocks allocated on private heap, the programmer must only use XFree(Heap, P) and not FreeMem(P)
     Inc(Heap.LargeBlockCount);
@@ -422,10 +422,10 @@ var
   CPU: Byte;
   IsFree: Byte;
   IsPrivateHeap: Byte;
-	OldSize: PtrUInt;
+  OldSize: PtrUInt;
   OldSX: Byte;
 begin
-	if P = nil then
+  if P = nil then
   begin
     Result := XHeapAlloc(Heap, NewSize);
     Exit;
@@ -445,25 +445,28 @@ begin
   Result := XHeapAlloc(Heap, NewSize);
   if Result = nil then
     Exit;
-	Move(PByte(P)^, PByte(Result)^, OldSize);
+  Move(PByte(P)^, PByte(Result)^, OldSize);
   ToroFreeMem(P);
 end;
 
-
-procedure BlockListExpand(BlockList: PBlockList);
+// Expand pointer array
+function BlockListExpand(BlockList: PBlockList): Boolean;
 var
   NewCapacity: Cardinal;
   NewList, tmp: PPointerArray;
 begin
   {$IFDEF DebugMemory}WriteDebug('BlockListExpand: BlockList: %h, Count: %d, Capacity: %d\n',[PtrUInt(BlockList), BlockList.Count, BlockList.Capacity]);{$ENDIF}
+  Result := False;
   NewCapacity := BlockList.Capacity*2;
   NewList := ToroGetMem(NewCapacity*SizeOf(Pointer));
-  Panic (NewList = nil, 'Toro ran out of memory\n');
+  if NewList = nil then
+    Exit;
   Move(BlockList.List^, NewList^, BlockList.Capacity*SizeOf(Pointer));
   tmp := BlockList.List;
   BlockList.Capacity := NewCapacity;
   BlockList.List := NewList;
   ToroFreeMem(tmp);
+  Result := True;
   {$IFDEF HEAP_STATS} Inc(CurrentVirtualAllocated, NewCapacity-BlockList.Capacity); {$ENDIF}
   {$IFDEF HEAP_STATS2} Inc(TotalVirtualAllocated, NewCapacity-BlockList.Capacity); {$ENDIF}
 end;
@@ -475,9 +478,10 @@ begin
   BlockList.List^[BlockList.Count] := P;
   Inc(BlockList.Count);
   // to avoid race condition with GetMem(), expand before it is full
-  if (BlockList.Capacity - BlockList.Count = 1)  then
+  if BlockList.Count = BlockList.Capacity-1 then
   begin
-    BlockListExpand(BlockList);
+    if not BlockListExpand(BlockList) then
+      Panic(True, 'BlockListAdd: No enough memory for expanding a list\n', []);
   end;
   {$IFDEF DebugMemory}WriteDebug('BlockListAdd: Chunk: %h, List: %h, Count: %d\n', [PtrUInt(P), PtrUInt(BlockList), BlockList.Count]); {$ENDIF}
 end;
@@ -672,39 +676,34 @@ var
   Chunk: Pointer;
   ChunkSize: PtrUInt;
   bCPU: Byte;
-  bIsFree, bIsPrivateHeap: Byte; 
+  bIsFree, bIsPrivateHeap: Byte;
   bSX: byte;
   bSize: PtrUInt;
   {$IFDEF DebugMemory}
-	j: longint;
+  j: longint;
   {$ENDIF}
 begin
   ChunkSX := SX+1;
-  // looking for free blocks
+  Result := nil;
   while (ChunkSX < MAX_SX) and (MemoryAllocator.Directory[ChunkSX].Count = 0) do
     Inc(ChunkSX);
   ChunkBlockList := @MemoryAllocator.Directory[ChunkSX];
-  // TODO: replace Panic() with something better
-  Panic(ChunkBlockList.Count = 0, 'ObtainFromLargerChunk: Toro ran out of memory\n');
-  // taking a block from the list 
+  if ChunkBlockList.Count = 0 then
+    Exit;
   Chunk := ChunkBlockList.List^[ChunkBlockList.Count-1];
   {$IFDEF DebugMemory} WriteDebug('ObtainFromLargerChunk: Whole chunk: %h, Size: %d, Count: %d\n', [PtrUInt(Chunk),DirectorySX[ChunkSX], ChunkBlockList.Count]); {$ENDIF}
   {$IFDEF DebugMemory}
-	for j:= 0 to (ChunkBlockList.Count-1) do
-	begin
-	 WriteDebug('ObtainFromLargerChunk: dump list %h\n', [PtrUInt(ChunkBlockList.List^[j])]);
-	end;
+    for j:= 0 to (ChunkBlockList.Count-1) do
+    begin
+      WriteDebug('ObtainFromLargerChunk: dump list %h\n', [PtrUInt(ChunkBlockList.List^[j])]);
+    end;
   {$ENDIF}
-  // ran out of memory
   if Chunk = nil then
-  begin
-    Result := nil;
     Exit;
-  end;
   Dec(ChunkBlockList.Count);
   ChunkSize := DirectorySX[ChunkSX];
   // update the size of block in the header
-  // todo: replace for something simpler
+  // TODO: replace for something simpler
   GetHeader(Chunk , bCPU, bSX, bIsFree, bIsPrivateHeap, bSize);
   bSX := SX;
   SetHeaderSX(bCPU, bSX, bIsFree, Chunk);
@@ -726,11 +725,11 @@ var
   MemoryAllocator: PMemoryAllocator;
   SX: Byte;
   {$IFDEF DebugMemory}
-   bCPU: Byte;
-   bIsFree, bIsPrivateHeap: Byte; 
-   bSX: byte;
-   bSize: PtrUInt;
-  {$ENDIF} 
+    bCPU: Byte;
+    bIsFree, bIsPrivateHeap: Byte;
+    bSX: byte;
+    bSize: PtrUInt;
+  {$ENDIF}
 begin
   DisableInt;
   Result := nil;
@@ -752,7 +751,6 @@ begin
   begin
     {$IFDEF DebugMemory} WriteDebug('ToroGetMem - SplitLargerChunk Size: %d SizeSX: %d\n', [Size, DirectorySX[SX]]); {$ENDIF}
     Result := ObtainFromLargerChunk(SX, MemoryAllocator);
-    // no more memory
     if Result = nil then
     begin
       WriteConsoleF('ToroGetMem: we ran out of memory!!!\n', []);
@@ -765,8 +763,7 @@ begin
     GetHeader(Result , bCPU, bSX, bIsFree, bIsPrivateHeap, bSize);
     WriteDebug('ToroGetMem: Header SXSize %d - List SXSize %d \n', [DirectorySX[bSX],DirectorySX[SX]]);
   {$ENDIF}
-  // If block is not free, we raise an exception
-  Panic(IsFree(Result)=0,'ToroGetMem: the memory block list has been corrupted\n');
+  Panic(IsFree(Result)=0,'ToroGetMem: the memory block list has been corrupted\n', []);
   ResetFreeFlag(Result);
   {$IFDEF HEAP_STATS}
     Inc(MemoryAllocator.CurrentAllocatedSize, DirectorySX[SX]);
@@ -792,8 +789,7 @@ begin
   GetHeader(Result , bCPU, bSX, bIsFree, bIsPrivateHeap, bSize);
   WriteDebug('ToroGetMem: Header SXSize %d - Lista SXSize %d \n', [DirectorySX[bSX],DirectorySX[SX]]);
   {$ENDIF}
-  // If block is not free, we raise an exception
-  Panic(IsFree(Result)=0, 'ToroGetMem: the memory block list has been corrupted\n');
+  Panic(IsFree(Result)=0, 'ToroGetMem: the memory block list has been corrupted\n', []);
   ResetFreeFlag(Result);
   Dec(BlockList.Count);
   {$IFDEF HEAP_STATS}
@@ -814,9 +810,6 @@ begin
     RestoreInt;
 end;
 
-//
-// Free a block on memory based on information in the header
-//
 function ToroFreeMem(P: Pointer): Integer;
 var
   BlockList: PBlockList;
@@ -826,10 +819,17 @@ var
   Size: PtrUInt;
   SX: Byte;
 begin
+  Result := 1;
+  if P = nil then
+  begin
+    {$IFDEF DebugMemory} WriteDebug('ToroFreeMem: freeing nil pointer\n', []); {$ENDIF}
+    Exit;
+  end;
   DisableInt;
   GetHeader(P, CPU, SX, IsFree, IsPrivateHeap, Size); // return block to original CPU MMU
+  Panic(Size = 0, 'ToroFreeMem: Size of pointer %h cannot be zero, memory has been corrupted\n', [PtrUInt(P)]);
   {$IFDEF DebugMemory} WriteDebug('ToroFreeMem: GetHeader Size %d, p: %h\n', [DirectorySX[SX], PtrUInt(P)]); {$ENDIF}
-  Panic(IsFree = FLAG_FREE, 'ToroFreeMem: memory block list corrupted\n');
+  Panic(IsFree = FLAG_FREE, 'ToroFreeMem: memory block list corrupted\n', []);
   if IsPrivateHeap = FLAG_PRIVATE_HEAP then
   begin
     SetFreeFlag(P); // not necessary, just in case we want to check that a block is not freed twice
@@ -871,9 +871,9 @@ end;
 // Returns free block of memory filling with zeros
 function ToroAllocMem(Size: PtrUInt): Pointer;
 begin
-	Result := ToroGetMem(Size);
-	if Result <> nil then
-  	FillChar(Result^, Size, 0);
+  Result := ToroGetMem(Size);
+  if Result <> nil then
+     FillChar(Result^, Size, 0);
 end;
 
 // Expand (or truncate) the size of block pointed by p and return the new pointer
@@ -882,10 +882,10 @@ var
   CPU: Byte;
   IsFree: Byte;
   IsPrivateHeap: Byte;
-	OldSize: PtrUInt;
+  OldSize: PtrUInt;
   OldSX: Byte;
 begin
-	if P = nil then
+  if P = nil then
   begin
     Result := ToroGetMem(NewSize);
     Exit;
@@ -901,12 +901,12 @@ begin
   if NewSize <= OldSize then
   begin
     Result := P;
-    Exit; 
+    Exit;
   end;
- 	Result := ToroGetMem(NewSize);
+  Result := ToroGetMem(NewSize);
   if Result = nil then
     Exit;
-	Move(PByte(P)^, PByte(Result)^, OldSize); 
+  Move(PByte(P)^, PByte(Result)^, OldSize);
   ToroFreeMem(P);
 end;
 
@@ -923,8 +923,8 @@ end;
 // For example:  if you make as CACHEABLE the region from $500000-$900000 , realy, the kernel marks as cacheable the region :
 // between $20000-$100000. The Unit in Cache's Manager is the PAGE_SIZE.
 //
-// - Call to Syscall for Cache the Region from the CORE where are you working . If you call to syscall from CORE#0 and the memory
-// region will be useb by CORE#2 the change won't be effect.
+// - Call to Syscall for Cache the Region from the CORE where are you working . If you call from CORE#0 and the memory
+// region is in CORE#2 the change won't be taken.
 //
 
 // Set a Memory's Region as CACHEABLE
@@ -1067,7 +1067,8 @@ begin
       Break;
     Inc(ID);
   end;
-  Panic(Buff.Flag = MEM_RESERVED,'DistributeMemoryRegions: Cannot find available memory region\n');
+  Panic(Buff.Flag = MEM_RESERVED,'DistributeMemoryRegions: Cannot find available memory region\n', []);
+  Panic(Buff.Length <= ALLOC_MEMORY_START,'DistributeMemoryRegions: Not enough memory to initialize\n', []);
   AssignableMemory := Buff.Length - (ALLOC_MEMORY_START - PtrUInt(Buff.Base));
   MemoryPerCpu := AssignableMemory div CPU_COUNT;
   WriteConsoleF('System Memory ... /V%d/n MB\n', [AvailableMemory div 1024 div 1024]);
@@ -1095,7 +1096,6 @@ begin
   end;
 end;
 
-// Initialization of Memory Directory for every Core
 procedure MemoryInit;
 var
   MajorBlockSize: PtrUInt;
@@ -1112,7 +1112,7 @@ begin
   SX := 1;
   while SX < MAX_SX do
   begin
-    DirectorySX[SX] := MajorBlockSize;        
+    DirectorySX[SX] := MajorBlockSize;
     Inc(SX);
     MajorBlockSize := MajorBlockSize*2;
   end;
@@ -1144,6 +1144,6 @@ begin
   ToroMemoryManager.ReAllocMem := @ToroReAllocMem;
   SetMemoryManager(ToroMemoryManager);
 end;
-  
+
 end.
 

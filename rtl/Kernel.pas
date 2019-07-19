@@ -1,14 +1,7 @@
 //
-// Here is load all the modules of Toro .
+// This unit contains the initialization of the kernel.
 //
-// Changes :
-//
-// 26/02/2007 Toro 0.03 Version by Matias Vara.
-// 04/05/2007 Toro 0.02 Version by Matias Vara.
-// 18/01/2007 Some modification in Memoy Model
-// 21/08/2006 Memory model implement .
-//
-// Copyright (c) 2003-2011 Matias Vara <matiasvara@yahoo.com>
+// Copyright (c) 2003-2018 Matias Vara <matiasvara@yahoo.com>
 // All Rights Reserved
 //
 //
@@ -35,6 +28,7 @@ interface
 type
   PtrInt = Int64;
 {$ENDIF}
+
 // function InitSystem is declared only for compatibility
 function InitSystem(notused: pointer): PtrInt; external {$IFDEF DCC} '' {$ENDIF} name 'PASCALMAIN';
 procedure KernelStart;
@@ -42,26 +36,41 @@ procedure KernelStart;
 implementation
 
 uses
-  {$IFDEF DEBUG} Debug, {$ENDIF}
+  {$IFDEF EnableDebug} Debug, {$ENDIF}
   Arch, Console, Process, Memory, FileSystem, Network;
-  
-// Called from Arch
+
+const
+  MainThreadStackSize = 64*1024;
+
 procedure KernelStart;
+{$IFDEF EnableDebug}
+var
+  tmp: PChar;
+{$ENDIF}
 begin
+  {$IFDEF ProfileBootTime}
+    ShutdownInQemu;
+    Reboot;
+  {$ENDIF}
+  ConsoleInit;
   WriteConsoleF('/c/VLoading Toro ...\n/n',[]);
   ArchInit;
-  // CPU must be initialized before DebugInit
-  FillChar(CPU, sizeof(CPU),0);
-  {$IFDEF DEBUG} DebugInit; {$ENDIF}
+  FillChar(CPU, sizeof(CPU), 0);
+  {$IFDEF EnableDebug} DebugInit; {$ENDIF}
   ProcessInit;
   MemoryInit;
+  {$IFDEF EnableDebug}
+    tmp := ToroGetMem(DebugRingSize);
+    Panic(tmp=nil,'No memory for ring buffer for debug\n', []);
+    SetDebugRing (tmp,DebugRingSize);
+    WriteDebug('Debug ring buffer size: %d\n',[DebugRingSize]);
+  {$ENDIF}
   FileSystemInit;
   NetworkInit;
-  ConsoleInit;
   // we will never return from this procedure call
-  {$IFDEF FPC} CreateInitThread(@InitSystem, 32*1024); {$ENDIF}
+  {$IFDEF FPC} CreateInitThread(@InitSystem, MainThreadStackSize); {$ENDIF}
   {$IFDEF DCC}
-//    CreateInitThread(@InitSystem, 32*1024);
+//    CreateInitThread(@InitSystem, MainThreadStackSize);
   {$ENDIF}
 end;
 
